@@ -75,4 +75,8 @@ For playback:
 
 The project must not assume one developer's GTA installation path.
 
-Use configurable MSBuild properties/local ignored settings for the path to `ScriptHookVDotNet3.dll`. CI should compile against the dependency variant/version relevant to the actual supported GTA edition and should not commit the DLL into the repository.
+Use configurable MSBuild properties/local ignored settings for `ScriptHookVDotNet3.dll`; prefer `/p:ScriptHookVDotNetPath=...` for builds and CI.
+
+The supported build target is GTA V Enhanced. CI is intentionally pinned to `Chiheb-Bacha/ScriptHookVDotNetEnhanced v1.1.0.6` and verifies the published release archive checksum before compiling. Do not silently replace it with the Legacy/upstream SHVDN nightly just because both expose a `ScriptHookVDotNet3.dll` with a compatible compile-time surface.
+
+Do not commit ScriptHookVDotNet binaries into this repository. If the supported runtime dependency changes, update CI, README and this skill together.
