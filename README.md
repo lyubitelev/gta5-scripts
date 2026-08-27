@@ -13,20 +13,27 @@ GTA V scripts and related tooling (ScriptHookVDotNet).
 
 ## Сборка проекта
 
-Для сборки требуется .NET Framework 4.8 и ссылка на `ScriptHookVDotNet3.dll`.
+Для сборки требуется .NET Framework 4.8 и внешняя зависимость `ScriptHookVDotNet3.dll`.
 
-### Базовая сборка:
+### 1. Сборка с указанием пути к GTA V / ScriptHookVDotNet:
+Укажите путь к установленной папке GTA V (содержащей `ScriptHookVDotNet3.dll`):
 ```bash
-msbuild gta.csproj /p:Configuration=Release
+msbuild gta.csproj /p:Configuration=Release /p:Gta5Path="C:\Games\Grand Theft Auto V"
 ```
 
-### Сборка с кастомным путем к GTA V / ScriptHookVDotNet:
-Вы можете переопределить свойство `Gta5Path` через параметры командной строки, файл `gta.csproj.user` или переменную окружения:
-```bash
-msbuild gta.csproj /p:Gta5Path="C:\Games\Grand Theft Auto V"
+### 2. Сборка через локальный `gta.csproj.user`:
+Создайте untracked файл `gta.csproj.user` рядом с `gta.csproj`:
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Gta5Path>C:\Games\Grand Theft Auto V</Gta5Path>
+  </PropertyGroup>
+</Project>
 ```
+После этого стандартная сборка `msbuild gta.csproj /p:Configuration=Release` подхватит путь автоматически.
 
-### Автоматический деплой в папку `scripts`:
+### 3. Автоматический деплой в папку `scripts`:
 ```bash
 msbuild gta.csproj /p:Gta5Path="C:\Games\Grand Theft Auto V" /p:DeployToGta=true
 ```

@@ -102,6 +102,26 @@ namespace gta.Ai
             }
         }
 
+        private sealed class QueuedAiAction
+        {
+            public Action ExecuteAction { get; set; }
+            public string AudioFilePath { get; set; }
+
+            public void Execute()
+            {
+                ExecuteAction?.Invoke();
+            }
+
+            public void Cancel()
+            {
+                if (!string.IsNullOrEmpty(AudioFilePath))
+                {
+                    CleanupFile(AudioFilePath);
+                    AudioFilePath = null;
+                }
+            }
+        }
+
         public void HandleKeyDown(KeyEventArgs e)
         {
             if (_isAborted) return;
@@ -111,7 +131,7 @@ namespace gta.Ai
                 if (_isKeyHandled) return;
                 _isKeyHandled = true;
 
-                AiLogger.Log("INPUT", $"KeyDown Z. Processing: {_isProcessing}, Recording: {_recordingService.IsRecording}");
+                AiLogger.Log("INPUT", $"KeyDown Z. Processing: {_isProcessing}, Recording: {_recordingService.IsRecording}, Busy: {_recordingService.IsBusy}");
 
                 // Z во время обработки = "хочу говорить сейчас": отменяем висящий запрос и начинаем заново тем же нажатием
                 if (_isProcessing)
@@ -122,7 +142,7 @@ namespace gta.Ai
                     Notifier.Show("Отменено");
                 }
 
-                if (!_recordingService.IsRecording)
+                if (!_recordingService.IsBusy)
                 {
                     var targetPed = _pedQuery.GetClosestPed(10.0f);
                     if (targetPed == null)
@@ -223,11 +243,14 @@ namespace gta.Ai
                             catch (Exception ex)
                             {
                                 AiLogger.Log("RECORD", $"Failed to stop/finalize recording: {ex.Message}");
-                                _actionQueue.Enqueue(() =>
+                                _actionQueue.Enqueue(new QueuedAiAction
                                 {
-                                    if (_isAborted || cts != _currentCts) return;
-                                    Notifier.Show($"Ошибка записи: {ex.Message}");
-                                    _isProcessing = false;
+                                    ExecuteAction = () =>
+                                    {
+                                        if (_isAborted || cts != _currentCts) return;
+                                        Notifier.Show($"Ошибка записи: {ex.Message}");
+                                        _isProcessing = false;
+                                    }
                                 });
                                 return;
                             }
@@ -235,10 +258,13 @@ namespace gta.Ai
                             if (string.IsNullOrEmpty(wavFile) || !File.Exists(wavFile))
                             {
                                 AiLogger.Log("RECORD", "Recording file is null or does not exist, aborting.");
-                                _actionQueue.Enqueue(() =>
+                                _actionQueue.Enqueue(new QueuedAiAction
                                 {
-                                    if (_isAborted || cts != _currentCts) return;
-                                    _isProcessing = false;
+                                    ExecuteAction = () =>
+                                    {
+                                        if (_isAborted || cts != _currentCts) return;
+                                        _isProcessing = false;
+                                    }
                                 });
                                 return;
                             }
@@ -268,7 +294,7 @@ namespace gta.Ai
         {
             var token = cts.Token;
             string audioFile = null;
-            bool audioFileHandedOver = false;
+            QueuedAiAction queuedAction = null;
             try
             {
                 AiLogger.Log("PROCESS", $"Starting {(proactive ? "PROACTIVE " : "")}interaction with {identity.Name} (Handle: {pedHandle})");
@@ -340,14 +366,19 @@ namespace gta.Ai
                     _npcManager.PersistKnownCharacter(identity);
                 }
 
-                // Queue to main thread
-                _actionQueue.Enqueue(() =>
+                // Создаем queuedAction, который владеет файлом audioFile
+                queuedAction = new QueuedAiAction
                 {
-                    // Защита от устаревших ответов: игрок мог отменить и начать новое взаимодействие
+                    AudioFilePath = audioFile
+                };
+
+                queuedAction.ExecuteAction = () =>
+                {
+                    // Защита от устаревших ответов: игрок мог отменить и начать новое взаимодействие или скрипт сброшен
                     if (_isAborted || cts != _currentCts || token.IsCancellationRequested)
                     {
                         AiLogger.Log("PROCESS", "Stale/cancelled result, ignoring (not applied).");
-                        CleanupFile(audioFile);
+                        queuedAction.Cancel();
                         return;
                     }
 
@@ -355,10 +386,12 @@ namespace gta.Ai
                     if (ped != null && ped.Exists() && !ped.IsDead)
                     {
                         Notifier.Show($"[{identity.Name}]: {response.Text}");
-                        if (!string.IsNullOrEmpty(audioFile))
+                        if (!string.IsNullOrEmpty(queuedAction.AudioFilePath))
                         {
-                            AiLogger.Log("PLAY", $"Playing audio file {audioFile} for {identity.Name}");
-                            _audioPlayService.PlayAudioForPed(audioFile, ped);
+                            var fileToPlay = queuedAction.AudioFilePath;
+                            queuedAction.AudioFilePath = null; // ownership передан в AudioPlayService
+                            AiLogger.Log("PLAY", $"Playing audio file {fileToPlay} for {identity.Name}");
+                            _audioPlayService.PlayAudioForPed(fileToPlay, ped);
                         }
                         AiLogger.Log("ACTION", $"Applying action: {response.Action} on {identity.Name}");
                         // Состояние снимаем заново на момент применения: между записью и ответом прошло несколько секунд
@@ -368,41 +401,49 @@ namespace gta.Ai
                     else
                     {
                         AiLogger.Log("PROCESS", $"Ped with handle {pedHandle} no longer exists, action not applied.");
-                        CleanupFile(audioFile);
+                        queuedAction.Cancel();
                     }
                     _isProcessing = false;
-                });
-                audioFileHandedOver = true;
+                };
+
+                // Queue to main thread
+                _actionQueue.Enqueue(queuedAction);
             }
             catch (OperationCanceledException)
             {
                 // Отличаем ручную отмену (игрок нажал Z → _currentCts.Cancel()) от таймаута этапа (сработал linked CancelAfter)
                 bool userCancelled = cts.IsCancellationRequested;
                 AiLogger.Log(userCancelled ? "CANCEL" : "TIMEOUT", userCancelled ? "User cancelled interaction." : "Stage timed out.");
-                _actionQueue.Enqueue(() =>
+                _actionQueue.Enqueue(new QueuedAiAction
                 {
-                    if (_isAborted || cts != _currentCts) return; // уже идёт новое взаимодействие — его состояние не трогаем
-                    if (!userCancelled) Notifier.Show("Таймаут запроса");
-                    _isProcessing = false;
+                    ExecuteAction = () =>
+                    {
+                        if (_isAborted || cts != _currentCts) return; // уже идёт новое взаимодействие — его состояние не трогаем
+                        if (!userCancelled) Notifier.Show("Таймаут запроса");
+                        _isProcessing = false;
+                    }
                 });
             }
             catch (Exception ex)
             {
                 AiLogger.Log("ERROR", ex.ToString());
-                _actionQueue.Enqueue(() =>
+                _actionQueue.Enqueue(new QueuedAiAction
                 {
-                    if (_isAborted || cts != _currentCts) return; // устаревший запрос — игнорируем
-                    Notifier.Show($"AI Error: {ex.Message}");
-                    var ped = Entity.FromHandle(pedHandle) as Ped;
-                    if (ped != null && ped.Exists())
+                    ExecuteAction = () =>
                     {
-                        bool wasHostileOrPanicked = state != null && (state.IsHostile || state.IsFleeing || state.IsCowering);
-                        if (!wasHostileOrPanicked)
+                        if (_isAborted || cts != _currentCts) return; // устаревший запрос — игнорируем
+                        Notifier.Show($"AI Error: {ex.Message}");
+                        var ped = Entity.FromHandle(pedHandle) as Ped;
+                        if (ped != null && ped.Exists())
                         {
-                            ped.Task.ClearAll();
+                            bool wasHostileOrPanicked = state != null && (state.IsHostile || state.IsFleeing || state.IsCowering);
+                            if (!wasHostileOrPanicked)
+                            {
+                                ped.Task.ClearAll();
+                            }
                         }
+                        _isProcessing = false;
                     }
-                    _isProcessing = false;
                 });
             }
             finally
@@ -410,24 +451,28 @@ namespace gta.Ai
                 // Cleanup WAV temp file
                 CleanupFile(wavFile);
 
-                // Cleanup MP3 if not handed over to AudioPlayService
-                if (!audioFileHandedOver && !string.IsNullOrEmpty(audioFile))
+                // Если упало до создания queuedAction, а audioFile сгенерирован — очищаем
+                if (queuedAction == null && !string.IsNullOrEmpty(audioFile))
                 {
                     CleanupFile(audioFile);
                 }
             }
         }
 
-        private readonly System.Collections.Concurrent.ConcurrentQueue<Action> _actionQueue = new System.Collections.Concurrent.ConcurrentQueue<Action>();
+        private readonly System.Collections.Concurrent.ConcurrentQueue<QueuedAiAction> _actionQueue = new System.Collections.Concurrent.ConcurrentQueue<QueuedAiAction>();
 
         public void ProcessQueue()
         {
-            if (_isAborted) return;
-
             while (_actionQueue.TryDequeue(out var action))
             {
-                if (_isAborted) break;
-                action?.Invoke();
+                if (_isAborted)
+                {
+                    action?.Cancel();
+                }
+                else
+                {
+                    action?.Execute();
+                }
             }
         }
 
@@ -458,7 +503,10 @@ namespace gta.Ai
             }
             catch { }
 
-            while (_actionQueue.TryDequeue(out _)) { }
+            while (_actionQueue.TryDequeue(out var action))
+            {
+                action?.Cancel();
+            }
 
             _isProcessing = false;
             _isKeyHandled = false;

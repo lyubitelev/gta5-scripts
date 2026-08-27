@@ -1,0 +1,48 @@
+name: Build Verification
+
+on:
+  push:
+    branches:
+      - develop
+      - add-files
+      - 'feature/**'
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  build:
+    name: Build (Windows / .NET Framework 4.8)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore gta.sln
+
+      - name: Download ScriptHookVDotNet dependency
+        shell: powershell
+        run: |
+          $dest = "${{ runner.temp }}\shvdn"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $zipPath = Join-Path $dest "ScriptHookVDotNet.zip"
+          Invoke-WebRequest -Uri "https://github.com/scripthookvdotnet/scripthookvdotnet/releases/download/v3.6.0/ScriptHookVDotNet.zip" -OutFile $zipPath -UseBasicParsing
+          Expand-Archive -Path $zipPath -DestinationPath $dest -Force
+          if (-not (Test-Path "$dest\ScriptHookVDotNet3.dll")) {
+            throw "ScriptHookVDotNet3.dll was not found in downloaded archive."
+          }
+
+      - name: Build Debug configuration
+        run: msbuild gta.csproj /p:Configuration=Debug /p:Platform="AnyCPU" /p:Gta5Path="${{ runner.temp }}\shvdn"
+
+      - name: Build Release configuration
+        run: msbuild gta.csproj /p:Configuration=Release /p:Platform="AnyCPU" /p:Gta5Path="${{ runner.temp }}\shvdn"

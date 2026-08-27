@@ -7,39 +7,99 @@ namespace gta.Ai
 {
     public class VoiceRecordingService
     {
-        private WaveInEvent _waveIn;
-        private WaveFileWriter _writer;
-        private string _tempFilePath;
-        private TaskCompletionSource<string> _recordingTcs;
-        private readonly object _lock = new object();
+        private sealed class RecordingSession
+        {
+            public WaveInEvent WaveIn { get; set; }
+            public WaveFileWriter Writer { get; set; }
+            public string FilePath { get; }
+            public TaskCompletionSource<string> Completion { get; }
+            public bool FileHandedOver { get; set; }
+            private readonly object _sessionLock = new object();
 
-        public bool IsRecording { get; private set; }
+            public RecordingSession(string filePath)
+            {
+                FilePath = filePath;
+                Completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            public void CleanupFileIfNotHandedOver()
+            {
+                lock (_sessionLock)
+                {
+                    if (!FileHandedOver && !string.IsNullOrEmpty(FilePath))
+                    {
+                        try
+                        {
+                            if (File.Exists(FilePath)) File.Delete(FilePath);
+                        }
+                        catch (Exception ex)
+                        {
+                            AiLogger.Log("RECORD", $"Failed to delete session temp file '{FilePath}': {ex.Message}");
+                        }
+                    }
+                }
+            }
+        }
+
+        private readonly object _lock = new object();
+        private RecordingSession _currentSession;
+        private RecordingSession _stoppingSession;
+
+        public bool IsRecording
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _currentSession != null;
+                }
+            }
+        }
+
+        public bool IsBusy
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _currentSession != null || _stoppingSession != null;
+                }
+            }
+        }
 
         public void StartRecording()
         {
             lock (_lock)
             {
-                if (IsRecording) return;
+                if (_currentSession != null || _stoppingSession != null)
+                {
+                    AiLogger.Log("RECORD", "Cannot start recording: previous recording session is still active or finalizing.");
+                    return;
+                }
 
-                _tempFilePath = Path.Combine(Path.GetTempPath(), $"gta_voice_{Guid.NewGuid()}.wav");
-                _recordingTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var filePath = Path.Combine(Path.GetTempPath(), $"gta_voice_{Guid.NewGuid()}.wav");
+                var session = new RecordingSession(filePath);
+                _currentSession = session;
 
                 try
                 {
-                    _waveIn = new WaveInEvent
+                    var waveIn = new WaveInEvent
                     {
-                        WaveFormat = new WaveFormat(16000, 1) // 16kHz Mono is good for Whisper
+                        WaveFormat = new WaveFormat(16000, 1) // 16kHz Mono is optimal for Whisper
                     };
 
-                    _writer = new WaveFileWriter(_tempFilePath, _waveIn.WaveFormat);
+                    var writer = new WaveFileWriter(filePath, waveIn.WaveFormat);
 
-                    _waveIn.DataAvailable += (s, a) =>
+                    session.WaveIn = waveIn;
+                    session.Writer = writer;
+
+                    waveIn.DataAvailable += (s, a) =>
                     {
-                        lock (_lock)
+                        lock (session)
                         {
                             try
                             {
-                                _writer?.Write(a.Buffer, 0, a.BytesRecorded);
+                                session.Writer?.Write(a.Buffer, 0, a.BytesRecorded);
                             }
                             catch (Exception ex)
                             {
@@ -48,23 +108,21 @@ namespace gta.Ai
                         }
                     };
 
-                    _waveIn.RecordingStopped += (s, a) =>
+                    waveIn.RecordingStopped += (s, a) =>
                     {
-                        var tcs = _recordingTcs;
-                        var filePath = _tempFilePath;
                         var ex = a.Exception;
 
-                        lock (_lock)
+                        lock (session)
                         {
                             try
                             {
-                                _writer?.Flush();
+                                session.Writer?.Flush();
                             }
                             catch { }
 
                             try
                             {
-                                _writer?.Dispose();
+                                session.Writer?.Dispose();
                             }
                             catch (Exception dex)
                             {
@@ -73,12 +131,12 @@ namespace gta.Ai
                             }
                             finally
                             {
-                                _writer = null;
+                                session.Writer = null;
                             }
 
                             try
                             {
-                                _waveIn?.Dispose();
+                                session.WaveIn?.Dispose();
                             }
                             catch (Exception wex)
                             {
@@ -86,110 +144,128 @@ namespace gta.Ai
                             }
                             finally
                             {
-                                _waveIn = null;
+                                session.WaveIn = null;
                             }
+                        }
+
+                        lock (_lock)
+                        {
+                            if (_stoppingSession == session) _stoppingSession = null;
+                            if (_currentSession == session) _currentSession = null;
                         }
 
                         if (ex != null)
                         {
                             AiLogger.Log("RECORD", $"Recording stopped with error: {ex.Message}");
-                            tcs?.TrySetException(ex);
+                            session.CleanupFileIfNotHandedOver();
+                            session.Completion.TrySetException(ex);
                         }
                         else
                         {
-                            tcs?.TrySetResult(filePath);
+                            session.FileHandedOver = true;
+                            session.Completion.TrySetResult(session.FilePath);
                         }
                     };
 
-                    _waveIn.StartRecording();
-                    IsRecording = true;
+                    waveIn.StartRecording();
                 }
                 catch (Exception ex)
                 {
                     AiLogger.Log("RECORD", $"Failed to start recording: {ex.Message}");
                     Core.Notifier.Show($"Ошибка микрофона: {ex.Message}");
-                    IsRecording = false;
 
-                    try { _writer?.Dispose(); } catch { }
-                    _writer = null;
-                    try { _waveIn?.Dispose(); } catch { }
-                    _waveIn = null;
+                    lock (session)
+                    {
+                        try { session.Writer?.Dispose(); } catch { }
+                        session.Writer = null;
+                        try { session.WaveIn?.Dispose(); } catch { }
+                        session.WaveIn = null;
+                    }
 
-                    _recordingTcs?.TrySetException(ex);
+                    session.CleanupFileIfNotHandedOver();
+                    session.Completion.TrySetException(ex);
+
+                    if (_currentSession == session) _currentSession = null;
+                    if (_stoppingSession == session) _stoppingSession = null;
                 }
             }
         }
 
         public Task<string> StopRecordingAsync()
         {
+            RecordingSession sessionToStop = null;
             lock (_lock)
             {
-                if (!IsRecording || _waveIn == null)
+                if (_currentSession == null)
                 {
                     return Task.FromResult<string>(null);
                 }
 
-                IsRecording = false;
-                var task = _recordingTcs != null ? _recordingTcs.Task : Task.FromResult<string>(_tempFilePath);
-
-                try
-                {
-                    _waveIn.StopRecording();
-                }
-                catch (Exception ex)
-                {
-                    AiLogger.Log("RECORD", $"Error calling StopRecording: {ex.Message}");
-                    _recordingTcs?.TrySetException(ex);
-                }
-
-                return task;
+                sessionToStop = _currentSession;
+                _stoppingSession = sessionToStop;
+                _currentSession = null;
             }
+
+            try
+            {
+                sessionToStop.WaveIn?.StopRecording();
+            }
+            catch (Exception ex)
+            {
+                AiLogger.Log("RECORD", $"Error calling StopRecording: {ex.Message}");
+                lock (sessionToStop)
+                {
+                    try { sessionToStop.Writer?.Dispose(); } catch { }
+                    sessionToStop.Writer = null;
+                    try { sessionToStop.WaveIn?.Dispose(); } catch { }
+                    sessionToStop.WaveIn = null;
+                }
+                sessionToStop.CleanupFileIfNotHandedOver();
+                sessionToStop.Completion.TrySetException(ex);
+
+                lock (_lock)
+                {
+                    if (_stoppingSession == sessionToStop) _stoppingSession = null;
+                }
+            }
+
+            return sessionToStop.Completion.Task;
         }
 
         public void Abort()
         {
-            string fileToDelete = null;
+            RecordingSession sessionA = null;
+            RecordingSession sessionB = null;
+
             lock (_lock)
             {
-                IsRecording = false;
-                fileToDelete = _tempFilePath;
-                _tempFilePath = null;
-                _recordingTcs?.TrySetCanceled();
-
-                try
-                {
-                    _waveIn?.StopRecording();
-                }
-                catch { }
-
-                try
-                {
-                    _writer?.Dispose();
-                }
-                catch { }
-                finally
-                {
-                    _writer = null;
-                }
-
-                try
-                {
-                    _waveIn?.Dispose();
-                }
-                catch { }
-                finally
-                {
-                    _waveIn = null;
-                }
+                sessionA = _currentSession;
+                sessionB = _stoppingSession;
+                _currentSession = null;
+                _stoppingSession = null;
             }
 
-            if (!string.IsNullOrEmpty(fileToDelete))
+            foreach (var session in new[] { sessionA, sessionB })
             {
+                if (session == null) continue;
+
+                session.Completion.TrySetCanceled();
+
                 try
                 {
-                    if (File.Exists(fileToDelete)) File.Delete(fileToDelete);
+                    session.WaveIn?.StopRecording();
                 }
                 catch { }
+
+                lock (session)
+                {
+                    try { session.Writer?.Dispose(); } catch { }
+                    session.Writer = null;
+                    try { session.WaveIn?.Dispose(); } catch { }
+                    session.WaveIn = null;
+                }
+
+                session.CleanupFileIfNotHandedOver();
             }
         }
     }
