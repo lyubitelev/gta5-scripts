@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <Import Project="$(MSBuildProjectFullPath).user" Condition="Exists('$(MSBuildProjectFullPath).user')" />
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
@@ -13,6 +14,8 @@
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <Deterministic>true</Deterministic>
     <TargetFrameworkProfile />
+    <Gta5Path Condition="'$(Gta5Path)' == ''">C:\Games\GTAVEnhanced</Gta5Path>
+    <DeployToGta Condition="'$(DeployToGta)' == ''">false</DeployToGta>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>x64</PlatformTarget>
@@ -20,7 +23,7 @@
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
-    <OutputPath>..\..\..\..\..\Games\GTAVEnhanced\scripts\</OutputPath>
+    <OutputPath>bin\Debug\</OutputPath>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -44,7 +47,9 @@
     </Reference>
     <Reference Include="ScriptHookVDotNet3, Version=3.7.0.20, Culture=neutral, processorArchitecture=AMD64">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\..\..\..\Games\GTAVEnhanced\ScriptHookVDotNet3.dll</HintPath>
+      <HintPath Condition="Exists('$(Gta5Path)\ScriptHookVDotNet3.dll')">$(Gta5Path)\ScriptHookVDotNet3.dll</HintPath>
+      <HintPath Condition="!Exists('$(Gta5Path)\ScriptHookVDotNet3.dll') and Exists('lib\ScriptHookVDotNet3.dll')">lib\ScriptHookVDotNet3.dll</HintPath>
+      <Private>False</Private>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Buffers, Version=4.0.3.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
@@ -176,4 +181,9 @@
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Target Name="DeployToGta" AfterTargets="Build" Condition="'$(DeployToGta)' == 'true' And Exists('$(Gta5Path)\scripts')">
+    <Message Importance="high" Text="Deploying $(TargetPath) to $(Gta5Path)\scripts..." />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(Gta5Path)\scripts" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(Gta5Path)\scripts" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+  </Target>
 </Project>

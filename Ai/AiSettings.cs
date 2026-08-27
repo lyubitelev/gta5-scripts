@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -26,16 +27,25 @@ namespace gta.Ai
         {
             if (!File.Exists(path))
             {
-                return new AiSettings();
+                var fallbackPath = Path.GetFileName(path);
+                if (File.Exists(fallbackPath))
+                {
+                    path = fallbackPath;
+                }
+                else
+                {
+                    return new AiSettings();
+                }
             }
 
-            var json = File.ReadAllText(path);
             try
             {
+                var json = File.ReadAllText(path);
                 return JsonSerializer.Deserialize<AiSettings>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AiSettings();
             }
-            catch
+            catch (Exception ex)
             {
+                AiLogger.Log("SETTINGS", $"Failed to load settings from {path}: {ex.Message}");
                 return new AiSettings();
             }
         }

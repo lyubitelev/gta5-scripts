@@ -30,6 +30,9 @@ namespace gta.Ai
 
     public class AiApiService
     {
+        public const string DefaultOpenAiModel = "gpt-4o-mini";
+        public const string DefaultGeminiModel = "gemini-2.5-flash";
+
         private readonly AiSettings _settings;
         private static readonly JsonSerializerOptions CaseInsensitiveOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
@@ -44,6 +47,16 @@ namespace gta.Ai
             _settings = settings;
         }
 
+        public static bool IsValidApiKey(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return false;
+            var trimmed = key.Trim();
+            if (trimmed.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase)) return false;
+            if (trimmed.Equals("placeholder", StringComparison.OrdinalIgnoreCase)) return false;
+            if (trimmed.Length < 8) return false;
+            return true;
+        }
+
         public async Task<string> TranscribeAudioAsync(string wavFilePath, CancellationToken token)
         {
             var providerName = _settings.ActiveProvider;
@@ -52,7 +65,11 @@ namespace gta.Ai
 
             // OpenAI is default
             var apiKey = _settings.GetProvider("OpenAI").ApiKey;
-            if (string.IsNullOrEmpty(apiKey)) return "Test transcription";
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("STT", "OpenAI API key is not configured or placeholder, skipping external call.");
+                return "Test transcription";
+            }
 
             using (var content = new MultipartFormDataContent())
             using (var fileStream = File.OpenRead(wavFilePath))
@@ -84,7 +101,11 @@ namespace gta.Ai
         private async Task<string> TranscribeGoogleAudioAsync(string wavFilePath, CancellationToken token)
         {
             var apiKey = _settings.GetProvider("Google").ApiKey;
-            if (string.IsNullOrEmpty(apiKey)) return "Google API key missing";
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("STT", "Google API key is not configured or placeholder, skipping external call.");
+                return "Google API key missing";
+            }
 
             var audioBytes = File.ReadAllBytes(wavFilePath);
             var base64Audio = Convert.ToBase64String(audioBytes);
@@ -136,10 +157,13 @@ namespace gta.Ai
             // OpenAI default
             var provider = _settings.GetProvider("OpenAI");
             var apiKey = provider.ApiKey;
-            if (string.IsNullOrEmpty(apiKey))
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("LLM", "OpenAI API key is not configured or placeholder, returning fallback response.");
                 return new AiResponse { Text = "I have nothing to say.", Action = "TALK" };
+            }
 
-            var model = !string.IsNullOrEmpty(provider.Model) ? provider.Model : "gpt-4o-mini";
+            var model = !string.IsNullOrWhiteSpace(provider.Model) ? provider.Model : DefaultOpenAiModel;
 
             var intro = npc.IsKnownCharacter
                 ? "The player is someone you KNOW personally — you move in the same Los Santos criminal circles (same crew, family or scene). Talk to them like a familiar associate, with your established attitude and shared history. Stay fully in character; never act like a polite stranger or an assistant, and never ask \"how can I help you\"."
@@ -253,10 +277,13 @@ Example output format:
         {
             var provider = _settings.GetProvider("Google");
             var apiKey = provider.ApiKey;
-            if (string.IsNullOrEmpty(apiKey))
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("LLM", "Google API key is not configured or placeholder, returning fallback response.");
                 return new AiResponse { Text = "Google API key is missing.", Action = "TALK" };
+            }
 
-            var model = !string.IsNullOrEmpty(provider.Model) ? provider.Model : "gemini-1.5-flash";
+            var model = !string.IsNullOrWhiteSpace(provider.Model) ? provider.Model : DefaultGeminiModel;
 
             var intro = npc.IsKnownCharacter
                 ? "The player is someone you KNOW personally — you move in the same Los Santos criminal circles (same crew, family or scene). Talk to them like a familiar associate, with your established attitude and shared history. Stay fully in character; never act like a polite stranger or an assistant, and never ask \"how can I help you\"."
@@ -376,7 +403,11 @@ Example output format:
 
             // ElevenLabs default
             var apiKey = _settings.GetProvider("ElevenLabs").ApiKey;
-            if (string.IsNullOrEmpty(apiKey)) return null;
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("TTS", "ElevenLabs API key is not configured or placeholder, skipping speech generation.");
+                return null;
+            }
 
             var requestBody = new
             {
@@ -409,7 +440,11 @@ Example output format:
         private async Task<string> GenerateOpenAISpeechAsync(string text, string voiceId, CancellationToken token)
         {
             var apiKey = _settings.GetProvider("OpenAI").ApiKey;
-            if (string.IsNullOrEmpty(apiKey)) return null;
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("TTS", "OpenAI API key is not configured or placeholder, skipping speech generation.");
+                return null;
+            }
 
             var requestBody = new
             {
@@ -443,7 +478,11 @@ Example output format:
         private async Task<string> GenerateGoogleSpeechAsync(string text, string voiceId, CancellationToken token)
         {
             var apiKey = _settings.GetProvider("Google").ApiKey;
-            if (string.IsNullOrEmpty(apiKey)) return null;
+            if (!IsValidApiKey(apiKey))
+            {
+                AiLogger.Log("TTS", "Google API key is not configured or placeholder, skipping speech generation.");
+                return null;
+            }
 
             // Voice id example: "en-US-Journey-D"
             var langCode = voiceId.Length >= 5 ? voiceId.Substring(0, 5) : "en-US";
@@ -497,8 +536,8 @@ Example output format:
                 {
                     var provider = _settings.GetProvider("Google");
                     var apiKey = provider.ApiKey;
-                    if (string.IsNullOrEmpty(apiKey)) return oldSummary;
-                    var model = !string.IsNullOrEmpty(provider.Model) ? provider.Model : "gemini-1.5-flash";
+                    if (!IsValidApiKey(apiKey)) return oldSummary;
+                    var model = !string.IsNullOrWhiteSpace(provider.Model) ? provider.Model : DefaultGeminiModel;
 
                     var body = new
                     {
@@ -525,8 +564,8 @@ Example output format:
                 {
                     var provider = _settings.GetProvider("OpenAI");
                     var apiKey = provider.ApiKey;
-                    if (string.IsNullOrEmpty(apiKey)) return oldSummary;
-                    var model = !string.IsNullOrEmpty(provider.Model) ? provider.Model : "gpt-4o-mini";
+                    if (!IsValidApiKey(apiKey)) return oldSummary;
+                    var model = !string.IsNullOrWhiteSpace(provider.Model) ? provider.Model : DefaultOpenAiModel;
 
                     var messages = new System.Collections.Generic.List<object>
                     {

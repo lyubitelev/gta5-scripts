@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using GTA;
 using NAudio.Wave;
 
@@ -9,6 +10,7 @@ namespace gta.Ai
         private WaveOutEvent _outputDevice;
         private AudioFileReader _audioFile;
         private Ped _speakingPed;
+        private string _currentAudioFilePath;
 
         public void PlayAudioForPed(string audioFilePath, Ped ped)
         {
@@ -16,6 +18,7 @@ namespace gta.Ai
 
             try
             {
+                _currentAudioFilePath = audioFilePath;
                 _outputDevice = new WaveOutEvent();
                 _audioFile = new AudioFileReader(audioFilePath);
                 _outputDevice.Init(_audioFile);
@@ -30,7 +33,9 @@ namespace gta.Ai
             }
             catch (Exception ex)
             {
+                AiLogger.Log("AUDIO", $"Ошибка воспроизведения: {ex.Message}");
                 Core.Notifier.Show($"Ошибка аудио: {ex.Message}");
+                StopAudio();
             }
         }
 
@@ -38,20 +43,46 @@ namespace gta.Ai
         {
             if (_outputDevice != null)
             {
-                _outputDevice.Stop();
-                _outputDevice.Dispose();
+                try { _outputDevice.Stop(); } catch { }
+                try { _outputDevice.Dispose(); } catch { }
                 _outputDevice = null;
             }
+
             if (_audioFile != null)
             {
-                _audioFile.Dispose();
+                try { _audioFile.Dispose(); } catch { }
                 _audioFile = null;
             }
 
+            CleanupCurrentAudioFile();
+
             if (_speakingPed != null && _speakingPed.Exists())
             {
-                GTA.Native.Function.Call(GTA.Native.Hash.PLAY_FACIAL_ANIM, _speakingPed.Handle, "mood_normal_1", "mp_facial");
+                try
+                {
+                    GTA.Native.Function.Call(GTA.Native.Hash.PLAY_FACIAL_ANIM, _speakingPed.Handle, "mood_normal_1", "mp_facial");
+                }
+                catch { }
                 _speakingPed = null;
+            }
+        }
+
+        private void CleanupCurrentAudioFile()
+        {
+            if (!string.IsNullOrEmpty(_currentAudioFilePath))
+            {
+                try
+                {
+                    if (File.Exists(_currentAudioFilePath))
+                    {
+                        File.Delete(_currentAudioFilePath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AiLogger.Log("AUDIO", $"Failed to delete temp audio file '{_currentAudioFilePath}': {ex.Message}");
+                }
+                _currentAudioFilePath = null;
             }
         }
 

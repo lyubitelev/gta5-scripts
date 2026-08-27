@@ -3,7 +3,7 @@
   "ProactiveEnabled": false,
   "Providers": {
     "OpenAI": {
-      "ApiKey": "YOUR_GOOGLE_API_KEY",
+      "ApiKey": "YOUR_OPENAI_API_KEY",
       "Model": "gpt-4o-mini",
       "MaleVoiceIds": [
         "echo",
@@ -20,7 +20,7 @@
     },
     "Google": {
       "ApiKey": "YOUR_GOOGLE_API_KEY",
-      "Model": "gemini-1.5-flash",
+      "Model": "gemini-2.5-flash",
       "MaleVoiceIds": [
         "en-US-Journey-D",
         "en-US-Standard-B",

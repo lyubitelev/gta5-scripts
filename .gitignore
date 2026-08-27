@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# AI Runtime Settings
+ai_settings.json
+scripts/ai_settings.json

@@ -209,6 +209,7 @@ namespace gta
 
         private void OnAborted(object sender, EventArgs e)
         {
+            _aiController.Abort();
             _speedLimiter.Abort();
             _bongService.Abort();
             _bulletTime.Abort();

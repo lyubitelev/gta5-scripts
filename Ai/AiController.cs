@@ -26,6 +26,7 @@ namespace gta.Ai
         private DateTime _recordStartTime;
         private DateTime _lastCleanup = DateTime.MinValue;
         private CancellationTokenSource _currentCts;
+        private volatile bool _isAborted;
 
         // Окно вовлечения в разговор: удерживаем собеседника лицом к игроку, пока оно активно
         private Ped _engagedPed;
@@ -87,6 +88,8 @@ namespace gta.Ai
 
         public void Update()
         {
+            if (_isAborted) return;
+
             _audioPlayService.Update();
             MaintainEngagement();
             MaybeProactive();
@@ -101,6 +104,8 @@ namespace gta.Ai
 
         public void HandleKeyDown(KeyEventArgs e)
         {
+            if (_isAborted) return;
+
             if (e.KeyCode == Keys.Z)
             {
                 if (_isKeyHandled) return;
@@ -162,21 +167,30 @@ namespace gta.Ai
 
         public void HandleKeyUp(KeyEventArgs e)
         {
+            if (_isAborted) return;
+
             if (e.KeyCode == Keys.Z)
             {
                 _isKeyHandled = false;
                 AiLogger.Log("INPUT", $"KeyUp Z. Recording: {_recordingService.IsRecording}");
                 if (_recordingService.IsRecording)
                 {
-                    var wavFile = _recordingService.StopRecording();
                     var recordedSeconds = (DateTime.Now - _recordStartTime).TotalSeconds;
-                    AiLogger.Log("RECORD", $"Stop recording voice ({recordedSeconds:F2}s). Saved to {wavFile}");
+                    var stopRecordTask = _recordingService.StopRecordingAsync();
 
                     if (recordedSeconds < MinRecordingSeconds)
                     {
                         AiLogger.Log("RECORD", $"Recording too short ({recordedSeconds:F2}s < {MinRecordingSeconds}s), ignoring.");
                         Notifier.Show("Слишком коротко — удерживайте Z дольше");
-                        try { if (!string.IsNullOrEmpty(wavFile) && File.Exists(wavFile)) File.Delete(wavFile); } catch { }
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var wav = await stopRecordTask;
+                                CleanupFile(wav);
+                            }
+                            catch { }
+                        });
                         return;
                     }
 
@@ -199,12 +213,52 @@ namespace gta.Ai
                         var cts = new CancellationTokenSource();
                         _currentCts = cts;
 
-                        Task.Run(async () => await ProcessInteractionAsync(wavFile, null, false, null, pedHandle, identity, playerHealth, wantedLevel, hasWeapon, state, cts));
+                        Task.Run(async () =>
+                        {
+                            string wavFile = null;
+                            try
+                            {
+                                wavFile = await stopRecordTask;
+                            }
+                            catch (Exception ex)
+                            {
+                                AiLogger.Log("RECORD", $"Failed to stop/finalize recording: {ex.Message}");
+                                _actionQueue.Enqueue(() =>
+                                {
+                                    if (_isAborted || cts != _currentCts) return;
+                                    Notifier.Show($"Ошибка записи: {ex.Message}");
+                                    _isProcessing = false;
+                                });
+                                return;
+                            }
+
+                            if (string.IsNullOrEmpty(wavFile) || !File.Exists(wavFile))
+                            {
+                                AiLogger.Log("RECORD", "Recording file is null or does not exist, aborting.");
+                                _actionQueue.Enqueue(() =>
+                                {
+                                    if (_isAborted || cts != _currentCts) return;
+                                    _isProcessing = false;
+                                });
+                                return;
+                            }
+
+                            await ProcessInteractionAsync(wavFile, null, false, null, pedHandle, identity, playerHealth, wantedLevel, hasWeapon, state, cts);
+                        });
                     }
                     else
                     {
                         AiLogger.Log("PROCESS", "Interacting ped no longer exists at KeyUp, aborting.");
                         _isProcessing = false;
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var wav = await stopRecordTask;
+                                CleanupFile(wav);
+                            }
+                            catch { }
+                        });
                     }
                 }
             }
@@ -213,6 +267,8 @@ namespace gta.Ai
         private async Task ProcessInteractionAsync(string wavFile, string presetUserText, bool proactive, string cannedText, int pedHandle, NpcIdentity identity, int playerHealth, int wantedLevel, bool hasWeapon, NpcState state, CancellationTokenSource cts)
         {
             var token = cts.Token;
+            string audioFile = null;
+            bool audioFileHandedOver = false;
             try
             {
                 AiLogger.Log("PROCESS", $"Starting {(proactive ? "PROACTIVE " : "")}interaction with {identity.Name} (Handle: {pedHandle})");
@@ -261,7 +317,7 @@ namespace gta.Ai
 
                 // 3. TTS
                 AiLogger.Log("TTS", $"Generating speech for text: \"{response.Text}\" using VoiceId: {identity.VoiceId}");
-                var audioFile = await _apiService.GenerateSpeechAsync(response.Text, identity.VoiceId, token);
+                audioFile = await _apiService.GenerateSpeechAsync(response.Text, identity.VoiceId, token);
                 AiLogger.Log("TTS", $"Result audio file: {audioFile ?? "NULL"}");
 
                 // Долговременная память известных персонажей: свернуть старое в сводку при превышении и сохранить на диск.
@@ -288,9 +344,10 @@ namespace gta.Ai
                 _actionQueue.Enqueue(() =>
                 {
                     // Защита от устаревших ответов: игрок мог отменить и начать новое взаимодействие
-                    if (cts != _currentCts || token.IsCancellationRequested)
+                    if (_isAborted || cts != _currentCts || token.IsCancellationRequested)
                     {
                         AiLogger.Log("PROCESS", "Stale/cancelled result, ignoring (not applied).");
+                        CleanupFile(audioFile);
                         return;
                     }
 
@@ -311,9 +368,11 @@ namespace gta.Ai
                     else
                     {
                         AiLogger.Log("PROCESS", $"Ped with handle {pedHandle} no longer exists, action not applied.");
+                        CleanupFile(audioFile);
                     }
                     _isProcessing = false;
                 });
+                audioFileHandedOver = true;
             }
             catch (OperationCanceledException)
             {
@@ -322,7 +381,7 @@ namespace gta.Ai
                 AiLogger.Log(userCancelled ? "CANCEL" : "TIMEOUT", userCancelled ? "User cancelled interaction." : "Stage timed out.");
                 _actionQueue.Enqueue(() =>
                 {
-                    if (cts != _currentCts) return; // уже идёт новое взаимодействие — его состояние не трогаем
+                    if (_isAborted || cts != _currentCts) return; // уже идёт новое взаимодействие — его состояние не трогаем
                     if (!userCancelled) Notifier.Show("Таймаут запроса");
                     _isProcessing = false;
                 });
@@ -332,7 +391,7 @@ namespace gta.Ai
                 AiLogger.Log("ERROR", ex.ToString());
                 _actionQueue.Enqueue(() =>
                 {
-                    if (cts != _currentCts) return; // устаревший запрос — игнорируем
+                    if (_isAborted || cts != _currentCts) return; // устаревший запрос — игнорируем
                     Notifier.Show($"AI Error: {ex.Message}");
                     var ped = Entity.FromHandle(pedHandle) as Ped;
                     if (ped != null && ped.Exists())
@@ -346,15 +405,77 @@ namespace gta.Ai
                     _isProcessing = false;
                 });
             }
+            finally
+            {
+                // Cleanup WAV temp file
+                CleanupFile(wavFile);
+
+                // Cleanup MP3 if not handed over to AudioPlayService
+                if (!audioFileHandedOver && !string.IsNullOrEmpty(audioFile))
+                {
+                    CleanupFile(audioFile);
+                }
+            }
         }
 
         private readonly System.Collections.Concurrent.ConcurrentQueue<Action> _actionQueue = new System.Collections.Concurrent.ConcurrentQueue<Action>();
 
         public void ProcessQueue()
         {
+            if (_isAborted) return;
+
             while (_actionQueue.TryDequeue(out var action))
             {
-                action();
+                if (_isAborted) break;
+                action?.Invoke();
+            }
+        }
+
+        public void Abort()
+        {
+            _isAborted = true;
+
+            try
+            {
+                _currentCts?.Cancel();
+                _currentCts?.Dispose();
+            }
+            catch { }
+            finally
+            {
+                _currentCts = null;
+            }
+
+            try
+            {
+                _recordingService?.Abort();
+            }
+            catch { }
+
+            try
+            {
+                _audioPlayService?.StopAudio();
+            }
+            catch { }
+
+            while (_actionQueue.TryDequeue(out _)) { }
+
+            _isProcessing = false;
+            _isKeyHandled = false;
+            _interactingPed = null;
+            _engagedPed = null;
+        }
+
+        private static void CleanupFile(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                AiLogger.Log("CLEANUP", $"Failed to delete temp file '{path}': {ex.Message}");
             }
         }
 

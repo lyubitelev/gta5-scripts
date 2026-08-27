@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using NAudio.Wave;
 
 namespace gta.Ai
@@ -9,54 +10,187 @@ namespace gta.Ai
         private WaveInEvent _waveIn;
         private WaveFileWriter _writer;
         private string _tempFilePath;
+        private TaskCompletionSource<string> _recordingTcs;
+        private readonly object _lock = new object();
 
         public bool IsRecording { get; private set; }
 
         public void StartRecording()
         {
-            if (IsRecording) return;
-
-            _tempFilePath = Path.Combine(Path.GetTempPath(), $"gta_voice_{Guid.NewGuid()}.wav");
-            
-            try
+            lock (_lock)
             {
-                _waveIn = new WaveInEvent
-                {
-                    WaveFormat = new WaveFormat(16000, 1) // 16kHz Mono is good for Whisper
-                };
+                if (IsRecording) return;
 
-                _writer = new WaveFileWriter(_tempFilePath, _waveIn.WaveFormat);
+                _tempFilePath = Path.Combine(Path.GetTempPath(), $"gta_voice_{Guid.NewGuid()}.wav");
+                _recordingTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-                _waveIn.DataAvailable += (s, a) =>
+                try
                 {
-                    _writer.Write(a.Buffer, 0, a.BytesRecorded);
-                };
+                    _waveIn = new WaveInEvent
+                    {
+                        WaveFormat = new WaveFormat(16000, 1) // 16kHz Mono is good for Whisper
+                    };
 
-                _waveIn.RecordingStopped += (s, a) =>
+                    _writer = new WaveFileWriter(_tempFilePath, _waveIn.WaveFormat);
+
+                    _waveIn.DataAvailable += (s, a) =>
+                    {
+                        lock (_lock)
+                        {
+                            try
+                            {
+                                _writer?.Write(a.Buffer, 0, a.BytesRecorded);
+                            }
+                            catch (Exception ex)
+                            {
+                                AiLogger.Log("RECORD", $"Error writing audio buffer: {ex.Message}");
+                            }
+                        }
+                    };
+
+                    _waveIn.RecordingStopped += (s, a) =>
+                    {
+                        var tcs = _recordingTcs;
+                        var filePath = _tempFilePath;
+                        var ex = a.Exception;
+
+                        lock (_lock)
+                        {
+                            try
+                            {
+                                _writer?.Flush();
+                            }
+                            catch { }
+
+                            try
+                            {
+                                _writer?.Dispose();
+                            }
+                            catch (Exception dex)
+                            {
+                                AiLogger.Log("RECORD", $"Error disposing writer: {dex.Message}");
+                                if (ex == null) ex = dex;
+                            }
+                            finally
+                            {
+                                _writer = null;
+                            }
+
+                            try
+                            {
+                                _waveIn?.Dispose();
+                            }
+                            catch (Exception wex)
+                            {
+                                AiLogger.Log("RECORD", $"Error disposing waveIn: {wex.Message}");
+                            }
+                            finally
+                            {
+                                _waveIn = null;
+                            }
+                        }
+
+                        if (ex != null)
+                        {
+                            AiLogger.Log("RECORD", $"Recording stopped with error: {ex.Message}");
+                            tcs?.TrySetException(ex);
+                        }
+                        else
+                        {
+                            tcs?.TrySetResult(filePath);
+                        }
+                    };
+
+                    _waveIn.StartRecording();
+                    IsRecording = true;
+                }
+                catch (Exception ex)
                 {
-                    _writer?.Dispose();
+                    AiLogger.Log("RECORD", $"Failed to start recording: {ex.Message}");
+                    Core.Notifier.Show($"Ошибка микрофона: {ex.Message}");
+                    IsRecording = false;
+
+                    try { _writer?.Dispose(); } catch { }
                     _writer = null;
-                    _waveIn?.Dispose();
+                    try { _waveIn?.Dispose(); } catch { }
                     _waveIn = null;
-                };
 
-                _waveIn.StartRecording();
-                IsRecording = true;
-            }
-            catch (Exception ex)
-            {
-                Core.Notifier.Show($"Ошибка микрофона: {ex.Message}");
-                IsRecording = false;
+                    _recordingTcs?.TrySetException(ex);
+                }
             }
         }
 
-        public string StopRecording()
+        public Task<string> StopRecordingAsync()
         {
-            if (!IsRecording) return null;
+            lock (_lock)
+            {
+                if (!IsRecording || _waveIn == null)
+                {
+                    return Task.FromResult<string>(null);
+                }
 
-            IsRecording = false;
-            _waveIn?.StopRecording();
-            return _tempFilePath;
+                IsRecording = false;
+                var task = _recordingTcs != null ? _recordingTcs.Task : Task.FromResult<string>(_tempFilePath);
+
+                try
+                {
+                    _waveIn.StopRecording();
+                }
+                catch (Exception ex)
+                {
+                    AiLogger.Log("RECORD", $"Error calling StopRecording: {ex.Message}");
+                    _recordingTcs?.TrySetException(ex);
+                }
+
+                return task;
+            }
+        }
+
+        public void Abort()
+        {
+            string fileToDelete = null;
+            lock (_lock)
+            {
+                IsRecording = false;
+                fileToDelete = _tempFilePath;
+                _tempFilePath = null;
+                _recordingTcs?.TrySetCanceled();
+
+                try
+                {
+                    _waveIn?.StopRecording();
+                }
+                catch { }
+
+                try
+                {
+                    _writer?.Dispose();
+                }
+                catch { }
+                finally
+                {
+                    _writer = null;
+                }
+
+                try
+                {
+                    _waveIn?.Dispose();
+                }
+                catch { }
+                finally
+                {
+                    _waveIn = null;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(fileToDelete))
+            {
+                try
+                {
+                    if (File.Exists(fileToDelete)) File.Delete(fileToDelete);
+                }
+                catch { }
+            }
         }
     }
 }
