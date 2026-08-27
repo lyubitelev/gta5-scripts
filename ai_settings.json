@@ -1,0 +1,49 @@
+{
+  "ActiveProvider": "OpenAI",
+  "ProactiveEnabled": false,
+  "Providers": {
+    "OpenAI": {
+      "ApiKey": "YOUR_GOOGLE_API_KEY",
+      "Model": "gpt-4o-mini",
+      "MaleVoiceIds": [
+        "echo",
+        "onyx",
+        "alloy",
+        "fable"
+      ],
+      "FemaleVoiceIds": [
+        "nova",
+        "shimmer",
+        "alloy",
+        "fable"
+      ]
+    },
+    "Google": {
+      "ApiKey": "YOUR_GOOGLE_API_KEY",
+      "Model": "gemini-1.5-flash",
+      "MaleVoiceIds": [
+        "en-US-Journey-D",
+        "en-US-Standard-B",
+        "en-US-Standard-D"
+      ],
+      "FemaleVoiceIds": [
+        "en-US-Journey-F",
+        "en-US-Standard-A",
+        "en-US-Standard-C"
+      ]
+    },
+    "ElevenLabs": {
+      "ApiKey": "YOUR_ELEVENLABS_API_KEY",
+      "MaleVoiceIds": [
+        "VR6AewLTigWG4xSOukaG",
+        "yoZ06aMxZJJ28mfd3POQ",
+        "pNInz6obpgDQGcFmaJcg"
+      ],
+      "FemaleVoiceIds": [
+        "EXAVITQu4vr4xnSDxMaL",
+        "MF3mGyEYCl7XYWbV9V6O",
+        "TxGEqnHWrfWFTfGW9XjX"
+      ]
+    }
+  }
+}
