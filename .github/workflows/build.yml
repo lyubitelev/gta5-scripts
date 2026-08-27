@@ -29,20 +29,28 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore gta.sln
 
-      - name: Download ScriptHookVDotNet dependency
+      - name: Download ScriptHookVDotNet Enhanced dependency
         shell: powershell
         run: |
           $dest = "${{ runner.temp }}\shvdn"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
           $zipPath = Join-Path $dest "ScriptHookVDotNet.zip"
-          Invoke-WebRequest -Uri "https://github.com/scripthookvdotnet/scripthookvdotnet/releases/download/v3.6.0/ScriptHookVDotNet.zip" -OutFile $zipPath -UseBasicParsing
+          try {
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/scripthookvdotnet/scripthookvdotnet-nightly/releases/latest" -Headers @{ "User-Agent" = "CI-Build" }
+            $downloadUrl = $release.assets[0].browser_download_url
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+          } catch {
+            Invoke-WebRequest -Uri "https://github.com/scripthookvdotnet/scripthookvdotnet-nightly/releases/download/v3.7.0-nightly.189/ScriptHookVDotNet-v3.7.0-nightly.189.zip" -OutFile $zipPath -UseBasicParsing
+          }
           Expand-Archive -Path $zipPath -DestinationPath $dest -Force
-          if (-not (Test-Path "$dest\ScriptHookVDotNet3.dll")) {
+          $dllPath = Join-Path $dest "ScriptHookVDotNet3.dll"
+          if (-not (Test-Path $dllPath)) {
             throw "ScriptHookVDotNet3.dll was not found in downloaded archive."
           }
+          echo "SHVDN_PATH=$dllPath" >> $env:GITHUB_ENV
 
       - name: Build Debug configuration
-        run: msbuild gta.csproj /p:Configuration=Debug /p:Platform="AnyCPU" /p:Gta5Path="${{ runner.temp }}\shvdn"
+        run: msbuild gta.csproj /p:Configuration=Debug /p:Platform="AnyCPU" /p:ScriptHookVDotNetPath="${{ env.SHVDN_PATH }}"
 
       - name: Build Release configuration
-        run: msbuild gta.csproj /p:Configuration=Release /p:Platform="AnyCPU" /p:Gta5Path="${{ runner.temp }}\shvdn"
+        run: msbuild gta.csproj /p:Configuration=Release /p:Platform="AnyCPU" /p:ScriptHookVDotNetPath="${{ env.SHVDN_PATH }}"

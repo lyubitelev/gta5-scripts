@@ -243,7 +243,7 @@ namespace gta.Ai
                             catch (Exception ex)
                             {
                                 AiLogger.Log("RECORD", $"Failed to stop/finalize recording: {ex.Message}");
-                                _actionQueue.Enqueue(new QueuedAiAction
+                                TryEnqueue(new QueuedAiAction
                                 {
                                     ExecuteAction = () =>
                                     {
@@ -258,7 +258,7 @@ namespace gta.Ai
                             if (string.IsNullOrEmpty(wavFile) || !File.Exists(wavFile))
                             {
                                 AiLogger.Log("RECORD", "Recording file is null or does not exist, aborting.");
-                                _actionQueue.Enqueue(new QueuedAiAction
+                                TryEnqueue(new QueuedAiAction
                                 {
                                     ExecuteAction = () =>
                                     {
@@ -407,14 +407,14 @@ namespace gta.Ai
                 };
 
                 // Queue to main thread
-                _actionQueue.Enqueue(queuedAction);
+                TryEnqueue(queuedAction);
             }
             catch (OperationCanceledException)
             {
                 // Отличаем ручную отмену (игрок нажал Z → _currentCts.Cancel()) от таймаута этапа (сработал linked CancelAfter)
                 bool userCancelled = cts.IsCancellationRequested;
                 AiLogger.Log(userCancelled ? "CANCEL" : "TIMEOUT", userCancelled ? "User cancelled interaction." : "Stage timed out.");
-                _actionQueue.Enqueue(new QueuedAiAction
+                TryEnqueue(new QueuedAiAction
                 {
                     ExecuteAction = () =>
                     {
@@ -427,7 +427,7 @@ namespace gta.Ai
             catch (Exception ex)
             {
                 AiLogger.Log("ERROR", ex.ToString());
-                _actionQueue.Enqueue(new QueuedAiAction
+                TryEnqueue(new QueuedAiAction
                 {
                     ExecuteAction = () =>
                     {
@@ -459,59 +459,86 @@ namespace gta.Ai
             }
         }
 
+        private readonly object _lifecycleLock = new object();
         private readonly System.Collections.Concurrent.ConcurrentQueue<QueuedAiAction> _actionQueue = new System.Collections.Concurrent.ConcurrentQueue<QueuedAiAction>();
+
+        private bool TryEnqueue(QueuedAiAction action)
+        {
+            if (action == null) return false;
+
+            lock (_lifecycleLock)
+            {
+                if (_isAborted)
+                {
+                    action.Cancel();
+                    return false;
+                }
+
+                _actionQueue.Enqueue(action);
+                return true;
+            }
+        }
 
         public void ProcessQueue()
         {
             while (_actionQueue.TryDequeue(out var action))
             {
-                if (_isAborted)
+                bool shouldExecute = false;
+                lock (_lifecycleLock)
                 {
-                    action?.Cancel();
+                    shouldExecute = !_isAborted;
+                }
+
+                if (shouldExecute)
+                {
+                    action?.Execute();
                 }
                 else
                 {
-                    action?.Execute();
+                    action?.Cancel();
                 }
             }
         }
 
         public void Abort()
         {
-            _isAborted = true;
-
-            try
+            lock (_lifecycleLock)
             {
-                _currentCts?.Cancel();
-                _currentCts?.Dispose();
-            }
-            catch { }
-            finally
-            {
-                _currentCts = null;
-            }
+                _isAborted = true;
 
-            try
-            {
-                _recordingService?.Abort();
-            }
-            catch { }
+                try
+                {
+                    _currentCts?.Cancel();
+                    _currentCts?.Dispose();
+                }
+                catch { }
+                finally
+                {
+                    _currentCts = null;
+                }
 
-            try
-            {
-                _audioPlayService?.StopAudio();
-            }
-            catch { }
+                try
+                {
+                    _recordingService?.Abort();
+                }
+                catch { }
 
-            while (_actionQueue.TryDequeue(out var action))
-            {
-                action?.Cancel();
-            }
+                try
+                {
+                    _audioPlayService?.StopAudio();
+                }
+                catch { }
 
-            _isProcessing = false;
-            _isKeyHandled = false;
-            _interactingPed = null;
-            _engagedPed = null;
+                while (_actionQueue.TryDequeue(out var action))
+                {
+                    action?.Cancel();
+                }
+
+                _isProcessing = false;
+                _isKeyHandled = false;
+                _interactingPed = null;
+                _engagedPed = null;
+            }
         }
 
         private static void CleanupFile(string path)

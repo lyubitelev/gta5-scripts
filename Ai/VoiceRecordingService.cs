@@ -13,7 +13,9 @@ namespace gta.Ai
             public WaveFileWriter Writer { get; set; }
             public string FilePath { get; }
             public TaskCompletionSource<string> Completion { get; }
-            public bool FileHandedOver { get; set; }
+
+            private bool _isHandedOver;
+            private bool _isCleanedUp;
             private readonly object _sessionLock = new object();
 
             public RecordingSession(string filePath)
@@ -22,20 +24,71 @@ namespace gta.Ai
                 Completion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
 
-            public void CleanupFileIfNotHandedOver()
+            public bool TryCompleteWithSuccess()
             {
                 lock (_sessionLock)
                 {
-                    if (!FileHandedOver && !string.IsNullOrEmpty(FilePath))
+                    if (_isCleanedUp) return false;
+
+                    if (Completion.TrySetResult(FilePath))
                     {
-                        try
-                        {
-                            if (File.Exists(FilePath)) File.Delete(FilePath);
-                        }
-                        catch (Exception ex)
-                        {
-                            AiLogger.Log("RECORD", $"Failed to delete session temp file '{FilePath}': {ex.Message}");
-                        }
+                        _isHandedOver = true;
+                        return true;
+                    }
+                    else
+                    {
+                        CleanupFileInternal();
+                        return false;
+                    }
+                }
+            }
+
+            public void CompleteWithError(Exception ex)
+            {
+                lock (_sessionLock)
+                {
+                    CleanupFileInternal();
+                    Completion.TrySetException(ex ?? new Exception("Unknown recording error"));
+                }
+            }
+
+            public void CancelAndCleanup()
+            {
+                lock (_sessionLock)
+                {
+                    Completion.TrySetCanceled();
+                    if (!_isHandedOver)
+                    {
+                        CleanupFileInternal();
+                    }
+                }
+            }
+
+            public void CleanupIfNotHandedOver()
+            {
+                lock (_sessionLock)
+                {
+                    if (!_isHandedOver)
+                    {
+                        CleanupFileInternal();
+                    }
+                }
+            }
+
+            private void CleanupFileInternal()
+            {
+                if (_isCleanedUp) return;
+                _isCleanedUp = true;
+
+                if (!string.IsNullOrEmpty(FilePath))
+                {
+                    try
+                    {
+                        if (File.Exists(FilePath)) File.Delete(FilePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        AiLogger.Log("RECORD", $"Failed to delete session temp file '{FilePath}': {ex.Message}");
                     }
                 }
             }
@@ -157,13 +210,11 @@ namespace gta.Ai
                         if (ex != null)
                         {
                             AiLogger.Log("RECORD", $"Recording stopped with error: {ex.Message}");
-                            session.CleanupFileIfNotHandedOver();
-                            session.Completion.TrySetException(ex);
+                            session.CompleteWithError(ex);
                         }
                         else
                         {
-                            session.FileHandedOver = true;
-                            session.Completion.TrySetResult(session.FilePath);
+                            session.TryCompleteWithSuccess();
                         }
                     };
 
@@ -182,8 +233,7 @@ namespace gta.Ai
                         session.WaveIn = null;
                     }
 
-                    session.CleanupFileIfNotHandedOver();
-                    session.Completion.TrySetException(ex);
+                    session.CompleteWithError(ex);
 
                     if (_currentSession == session) _currentSession = null;
                     if (_stoppingSession == session) _stoppingSession = null;
@@ -220,8 +270,7 @@ namespace gta.Ai
                     try { sessionToStop.WaveIn?.Dispose(); } catch { }
                     sessionToStop.WaveIn = null;
                 }
-                sessionToStop.CleanupFileIfNotHandedOver();
-                sessionToStop.Completion.TrySetException(ex);
+                sessionToStop.CompleteWithError(ex);
 
                 lock (_lock)
                 {
@@ -249,8 +298,6 @@ namespace gta.Ai
             {
                 if (session == null) continue;
 
-                session.Completion.TrySetCanceled();
-
                 try
                 {
                     session.WaveIn?.StopRecording();
@@ -265,7 +312,7 @@ namespace gta.Ai
                     session.WaveIn = null;
                 }
 
-                session.CleanupFileIfNotHandedOver();
+                session.CancelAndCleanup();
             }
         }
     }
