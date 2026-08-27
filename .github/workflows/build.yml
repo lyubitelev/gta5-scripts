@@ -29,25 +29,32 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore gta.sln
 
-      - name: Download ScriptHookVDotNet Enhanced dependency
+      - name: Download pinned ScriptHookVDotNet Enhanced dependency
         shell: powershell
         run: |
-          $dest = "${{ runner.temp }}\shvdn"
+          $dest = "${{ runner.temp }}\shvdn-enhanced"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          $zipPath = Join-Path $dest "ScriptHookVDotNet.zip"
-          try {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/scripthookvdotnet/scripthookvdotnet-nightly/releases/latest" -Headers @{ "User-Agent" = "CI-Build" }
-            $downloadUrl = $release.assets[0].browser_download_url
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-          } catch {
-            Invoke-WebRequest -Uri "https://github.com/scripthookvdotnet/scripthookvdotnet-nightly/releases/download/v3.7.0-nightly.189/ScriptHookVDotNet-v3.7.0-nightly.189.zip" -OutFile $zipPath -UseBasicParsing
+
+          $zipPath = Join-Path $dest "ScriptHookVDotNetEnhanced-v1.1.0.6.zip"
+          $downloadUrl = "https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced/releases/download/v1.1.0.6/ScriptHookVDotNetEnhanced-v1.1.0.6.zip"
+          $expectedSha256 = "f10da8819fa6814fb0a04553567d2516934eac96b16af06ad8f315f0da00473a"
+
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+
+          $actualSha256 = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "ScriptHookVDotNet Enhanced archive checksum mismatch. Expected $expectedSha256, got $actualSha256."
           }
-          Expand-Archive -Path $zipPath -DestinationPath $dest -Force
-          $dllPath = Join-Path $dest "ScriptHookVDotNet3.dll"
-          if (-not (Test-Path $dllPath)) {
-            throw "ScriptHookVDotNet3.dll was not found in downloaded archive."
+
+          $extractPath = Join-Path $dest "extracted"
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+          $dll = Get-ChildItem -Path $extractPath -Filter "ScriptHookVDotNet3.dll" -File -Recurse | Select-Object -First 1
+          if ($null -eq $dll) {
+            throw "ScriptHookVDotNet3.dll was not found in ScriptHookVDotNet Enhanced v1.1.0.6 archive."
           }
-          echo "SHVDN_PATH=$dllPath" >> $env:GITHUB_ENV
+
+          echo "SHVDN_PATH=$($dll.FullName)" >> $env:GITHUB_ENV
 
       - name: Build Debug configuration
         run: msbuild gta.csproj /p:Configuration=Debug /p:Platform="AnyCPU" /p:ScriptHookVDotNetPath="${{ env.SHVDN_PATH }}"
